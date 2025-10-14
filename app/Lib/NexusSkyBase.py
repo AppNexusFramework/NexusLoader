@@ -15,7 +15,6 @@ from typing import Optional, Dict, Any, Union
 from urllib.parse import urlparse
 from NexusFramework import allow_cli
 
-@allow_cli
 class NexusSkyBase:
     """
     Universal module loader for compiled Python modules.
