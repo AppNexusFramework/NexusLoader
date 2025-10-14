@@ -13,8 +13,9 @@ import requests
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from urllib.parse import urlparse
+from NexusFramework import allow_cli
 
-
+@allow_cli
 class NexusSkyBase:
     """
     Universal module loader for compiled Python modules.
@@ -300,6 +301,7 @@ class NexusSkyBase:
         # Extract to cache directory
         return self._extract_zip(zip_path, self.cache_dir)
     
+    @allow_cli
     def install(
         self,
         source: str,
