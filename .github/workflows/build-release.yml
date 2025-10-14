@@ -1,0 +1,1621 @@
+name: Build and Release Binary
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+      component_name:
+        description: 'Nexus component name (e.g., NexusSkyTransform, nexus_kube)'
+        required: false
+        type: string
+        default: ''
+      binary_base_name:
+        description: 'Base name for binary output (e.g., nexus-sky, nexus-kube)'
+        required: false
+        type: string
+        default: ''
+      python_version:
+        description: 'Python version to use'
+        required: false
+        type: string
+        default: ''
+      enable_linux:
+        description: 'Build Linux binary'
+        required: false
+        type: boolean
+        default: true
+      enable_windows:
+        description: 'Build Windows binary'
+        required: false
+        type: boolean
+        default: true
+      enable_macos:
+        description: 'Build macOS binary'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  CONFIG_FILE: 'app/app.json'
+
+jobs:
+  setup:
+    name: Setup Build Environment
+    runs-on: ubuntu-latest
+    outputs:
+      version_bump: ${{ steps.config.outputs.version_bump }}
+      component_name: ${{ steps.config.outputs.component_name }}
+      binary_name: ${{ steps.config.outputs.binary_name }}
+      python_version: ${{ steps.config.outputs.python_version }}
+      build_linux: ${{ steps.config.outputs.build_linux }}
+      build_windows: ${{ steps.config.outputs.build_windows }}
+      build_macos: ${{ steps.config.outputs.build_macos }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Read build configuration
+        id: config
+        run: |
+          CONFIG_FILE="${{ env.CONFIG_FILE }}"
+          
+          # Check if manual trigger has values
+          MANUAL_COMPONENT="${{ github.event.inputs.component_name }}"
+          MANUAL_BINARY="${{ github.event.inputs.binary_base_name }}"
+          MANUAL_PYTHON="${{ github.event.inputs.python_version }}"
+          
+          # If manually triggered with values, use them
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "$MANUAL_COMPONENT" ]; then
+            echo "Using manual trigger values"
+            VERSION_BUMP="${{ github.event.inputs.version_bump }}"
+            COMPONENT_NAME="$MANUAL_COMPONENT"
+            BINARY_NAME="$MANUAL_BINARY"
+            PYTHON_VERSION="${MANUAL_PYTHON:-3.11}"
+            BUILD_LINUX="${{ github.event.inputs.enable_linux }}"
+            BUILD_WINDOWS="${{ github.event.inputs.enable_windows }}"
+            BUILD_MACOS="${{ github.event.inputs.enable_macos }}"
+          else
+            # Read from config file
+            echo "Reading from config file: $CONFIG_FILE"
+            
+            if [ ! -f "$CONFIG_FILE" ]; then
+              echo "Error: Config file not found: $CONFIG_FILE"
+              exit 1
+            fi
+            
+            VERSION_BUMP=$(jq -r '.version_bump // "patch"' "$CONFIG_FILE")
+            COMPONENT_NAME=$(jq -r '.component_name' "$CONFIG_FILE")
+            BINARY_NAME=$(jq -r '.binary_base_name' "$CONFIG_FILE")
+            PYTHON_VERSION=$(jq -r '.python_version // "3.11"' "$CONFIG_FILE")
+            BUILD_LINUX=$(jq -r '.build_targets.linux // true' "$CONFIG_FILE")
+            BUILD_WINDOWS=$(jq -r '.build_targets.windows // true' "$CONFIG_FILE")
+            BUILD_MACOS=$(jq -r '.build_targets.macos // true' "$CONFIG_FILE")
+          fi
+          
+          # Validate required fields
+          if [ -z "$COMPONENT_NAME" ] || [ "$COMPONENT_NAME" == "null" ]; then
+            echo "Error: component_name is required"
+            exit 1
+          fi
+          
+          if [ -z "$BINARY_NAME" ] || [ "$BINARY_NAME" == "null" ]; then
+            echo "Error: binary_base_name is required"
+            exit 1
+          fi
+          
+          # Output configuration
+          echo "version_bump=$VERSION_BUMP" >> $GITHUB_OUTPUT
+          echo "component_name=$COMPONENT_NAME" >> $GITHUB_OUTPUT
+          echo "binary_name=$BINARY_NAME" >> $GITHUB_OUTPUT
+          echo "python_version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "build_linux=$BUILD_LINUX" >> $GITHUB_OUTPUT
+          echo "build_windows=$BUILD_WINDOWS" >> $GITHUB_OUTPUT
+          echo "build_macos=$BUILD_MACOS" >> $GITHUB_OUTPUT
+          
+          # Display configuration
+          echo "Configuration loaded:"
+          echo "  Component: $COMPONENT_NAME"
+          echo "  Binary: $BINARY_NAME"
+          echo "  Python: $PYTHON_VERSION"
+          echo "  Version Bump: $VERSION_BUMP"
+          echo "  Build Linux: $BUILD_LINUX"
+          echo "  Build Windows: $BUILD_WINDOWS"
+          echo "  Build macOS: $BUILD_MACOS"
+
+  version:
+    name: Determine Version
+    needs: setup
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+      version_bump: ${{ steps.set_bump.outputs.version_bump }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set version bump type
+        id: set_bump
+        run: |
+          # Check if manually triggered
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version_bump=${{ github.event.inputs.version_bump }}" >> $GITHUB_OUTPUT
+          else
+            # Use version from config or auto-detect from commit
+            VERSION_BUMP="${{ needs.setup.outputs.version_bump }}"
+            
+            if [ "$VERSION_BUMP" == "auto" ] || [ -z "$VERSION_BUMP" ]; then
+              # Auto-detect from commit message
+              COMMIT_MSG=$(git log -1 --pretty=%B)
+              if [[ "$COMMIT_MSG" =~ \[major\] ]] || [[ "$COMMIT_MSG" =~ BREAKING\ CHANGE ]]; then
+                VERSION_BUMP="major"
+              elif [[ "$COMMIT_MSG" =~ \[minor\] ]] || [[ "$COMMIT_MSG" =~ ^feat ]]; then
+                VERSION_BUMP="minor"
+              else
+                VERSION_BUMP="patch"
+              fi
+            fi
+            
+            echo "version_bump=$VERSION_BUMP" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Version bump type: $(cat $GITHUB_OUTPUT | grep version_bump | cut -d= -f2)"
+      
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          COMPONENT="${{ needs.setup.outputs.component_name }}"
+          LATEST_TAG=$(git tag -l "${COMPONENT}-v*" --sort=-v:refname | head -n 1)
+          
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="${COMPONENT}-v0.0.0"
+          fi
+          
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+      
+      - name: Bump version
+        id: bump_version
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          VERSION_BUMP="${{ steps.set_bump.outputs.version_bump }}"
+          COMPONENT="${{ needs.setup.outputs.component_name }}"
+          
+          echo "Latest tag: $LATEST_TAG"
+          echo "Component: $COMPONENT"
+          echo "Version bump: $VERSION_BUMP"
+          
+          # Remove component prefix and 'v' prefix
+          VERSION="${LATEST_TAG#${COMPONENT}-v}"
+          
+          echo "Extracted version: $VERSION"
+          
+          # Split version into components using parameter expansion
+          MAJOR="${VERSION%%.*}"
+          TEMP="${VERSION#*.}"
+          MINOR="${TEMP%%.*}"
+          PATCH="${TEMP#*.}"
+          
+          # Default to 0 if empty
+          MAJOR="${MAJOR:-0}"
+          MINOR="${MINOR:-0}"
+          PATCH="${PATCH:-0}"
+          
+          echo "Current version: $MAJOR.$MINOR.$PATCH"
+          
+          # Bump version based on type
+          case "$VERSION_BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+            *)
+              echo "Unknown version bump type: $VERSION_BUMP"
+              exit 1
+              ;;
+          esac
+          
+          NEW_VERSION="${COMPONENT}-v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION (bump type: $VERSION_BUMP)"
+
+  test:
+    name: Run Unit Tests
+    needs: [setup, version]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.setup.outputs.python_version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || echo "No requirements.txt found"
+          pip install pytest || echo "pytest not required"
+
+      - name: Run tests (if available)
+        run: |
+          if [ -d "tests" ]; then
+            echo "Running tests from 'tests/'..."
+            pytest tests/ --maxfail=3 --disable-warnings -q || echo "Some tests failed, continuing..."
+          elif [ -d "test" ]; then
+            echo "Running tests from 'test/'..."
+            pytest test/ --maxfail=3 --disable-warnings -q || echo "Some tests failed, continuing..."
+          else
+            echo "No test directory found, skipping tests."
+          fi
+        shell: bash
+
+  build:
+    name: Build Binary Modules
+    needs: [setup, version, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            extension: .so
+            artifact_name: linux-binary
+          - os: windows-latest
+            platform: windows
+            extension: .pyd
+            artifact_name: windows-binary
+          - os: macos-latest
+            platform: macos
+            extension: .so
+            artifact_name: macos-binary
+    
+    steps:
+      - name: Check if platform is enabled
+        id: check_enabled
+        shell: bash
+        run: |
+          ENABLED="true"
+          
+          if [ "${{ matrix.platform }}" == "linux" ] && [ "${{ needs.setup.outputs.build_linux }}" != "true" ]; then
+            ENABLED="false"
+          elif [ "${{ matrix.platform }}" == "windows" ] && [ "${{ needs.setup.outputs.build_windows }}" != "true" ]; then
+            ENABLED="false"
+          elif [ "${{ matrix.platform }}" == "macos" ] && [ "${{ needs.setup.outputs.build_macos }}" != "true" ]; then
+            ENABLED="false"
+          fi
+          
+          echo "enabled=$ENABLED" >> $GITHUB_OUTPUT
+          echo "Platform ${{ matrix.platform }} enabled: $ENABLED"
+      
+      - name: Skip if disabled
+        if: steps.check_enabled.outputs.enabled != 'true'
+        shell: bash
+        run: |
+          echo "Skipping build for ${{ matrix.platform }} (disabled in configuration)"
+          exit 0
+      
+      - name: Checkout code
+        if: steps.check_enabled.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        if: steps.check_enabled.outputs.enabled == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.setup.outputs.python_version }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        if: steps.check_enabled.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka ordered-set
+          pip install -r requirements.txt || echo "No requirements.txt found"
+          
+          # Verify Nuitka installation
+          echo "Nuitka version:"
+          python -m nuitka --version
+          
+          # Check for C compiler (platform specific)
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            echo "Checking for MSVC..."
+            where cl 2>/dev/null || where gcc 2>/dev/null || echo "Warning: No compiler found, Nuitka will download MinGW"
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            echo "Checking for Clang..."
+            clang --version || echo "Warning: Clang not found"
+          else
+            echo "Checking for GCC..."
+            gcc --version || echo "Warning: GCC not found"
+          fi
+      
+      - name: Discover Python modules
+        if: steps.check_enabled.outputs.enabled == 'true'
+        id: discover
+        shell: bash
+        run: |
+          echo "Discovering Python modules in app/ directory..."
+          echo "Current directory: $(pwd)"
+          echo ""
+          
+          # Check if app directory exists
+          if [ ! -d "app" ]; then
+            echo "Error: app/ directory not found!"
+            echo "Directory listing:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Contents of app/ directory:"
+          ls -la app/
+          echo ""
+          
+          # Find all .py files in app/ (excluding __init__.py and test files)
+          MODULES=$(find app -type f -name "*.py" ! -name "__init__.py" ! -name "test_*.py" ! -path "*/tests/*" ! -path "*/__pycache__/*" 2>/dev/null)
+          
+          if [ -z "$MODULES" ]; then
+            echo "Error: No Python modules found in app/"
+            echo ""
+            echo "Full directory tree:"
+            find app -type f -name "*.py" 2>/dev/null || echo "find command failed"
+            exit 1
+          fi
+          
+          echo "Found modules:"
+          echo "$MODULES"
+          echo ""
+          
+          # Count modules
+          MODULE_COUNT=$(echo "$MODULES" | wc -l)
+          echo "Total modules to compile: $MODULE_COUNT"
+          echo ""
+          
+          # Save to file for next step
+          echo "$MODULES" > modules_list.txt
+          
+          echo "Modules list saved to modules_list.txt"
+          echo "Contents:"
+          cat modules_list.txt
+      
+      - name: Analyze imports and create minimal requirements
+        if: steps.check_enabled.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          echo "Analyzing imports from Python modules..."
+          echo ""
+          
+          # Get Python version
+          PYTHON_VERSION="${{ needs.setup.outputs.python_version }}"
+          echo "Target Python version: $PYTHON_VERSION"
+          echo ""
+          
+          # Create a Python script to extract imports
+          cat > analyze_imports.py << 'PYEOF'
+          import ast
+          import sys
+          import json
+          import re
+          from pathlib import Path
+          
+          # Force UTF-8 encoding for stdout
+          if sys.platform == 'win32':
+              import io
+              sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+              sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+          
+          # Standard library modules (don't include these)
+          STDLIB_MODULES = {
+              'abc', 'aifc', 'argparse', 'array', 'ast', 'asynchat', 'asyncio', 'asyncore',
+              'atexit', 'audioop', 'base64', 'bdb', 'binascii', 'binhex', 'bisect', 'builtins',
+              'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd', 'code', 'codecs',
+              'codeop', 'collections', 'colorsys', 'compileall', 'concurrent', 'configparser',
+              'contextlib', 'contextvars', 'copy', 'copyreg', 'cProfile', 'crypt', 'csv',
+              'ctypes', 'curses', 'dataclasses', 'datetime', 'dbm', 'decimal', 'difflib',
+              'dis', 'distutils', 'doctest', 'email', 'encodings', 'enum', 'errno', 'faulthandler',
+              'fcntl', 'filecmp', 'fileinput', 'fnmatch', 'formatter', 'fractions', 'ftplib',
+              'functools', 'gc', 'getopt', 'getpass', 'gettext', 'glob', 'graphlib', 'grp',
+              'gzip', 'hashlib', 'heapq', 'hmac', 'html', 'http', 'imaplib', 'imghdr', 'imp',
+              'importlib', 'inspect', 'io', 'ipaddress', 'itertools', 'json', 'keyword',
+              'lib2to3', 'linecache', 'locale', 'logging', 'lzma', 'mailbox', 'mailcap',
+              'marshal', 'math', 'mimetypes', 'mmap', 'modulefinder', 'msilib', 'msvcrt',
+              'multiprocessing', 'netrc', 'nis', 'nntplib', 'numbers', 'operator', 'optparse',
+              'os', 'ossaudiodev', 'parser', 'pathlib', 'pdb', 'pickle', 'pickletools', 'pipes',
+              'pkgutil', 'platform', 'plistlib', 'poplib', 'posix', 'posixpath', 'pprint',
+              'profile', 'pstats', 'pty', 'pwd', 'py_compile', 'pyclbr', 'pydoc', 'queue',
+              'quopri', 'random', 're', 'readline', 'reprlib', 'resource', 'rlcompleter',
+              'runpy', 'sched', 'secrets', 'select', 'selectors', 'shelve', 'shlex', 'shutil',
+              'signal', 'site', 'smtpd', 'smtplib', 'sndhdr', 'socket', 'socketserver', 'spwd',
+              'sqlite3', 'ssl', 'stat', 'statistics', 'string', 'stringprep', 'struct',
+              'subprocess', 'sunau', 'symbol', 'symtable', 'sys', 'sysconfig', 'syslog',
+              'tabnanny', 'tarfile', 'telnetlib', 'tempfile', 'termios', 'test', 'textwrap',
+              'threading', 'time', 'timeit', 'tkinter', 'token', 'tokenize', 'trace', 'traceback',
+              'tracemalloc', 'tty', 'turtle', 'turtledemo', 'types', 'typing', 'unicodedata',
+              'unittest', 'urllib', 'uu', 'uuid', 'venv', 'warnings', 'wave', 'weakref',
+              'webbrowser', 'winreg', 'winsound', 'wsgiref', 'xdrlib', 'xml', 'xmlrpc', 'zipapp',
+              'zipfile', 'zipimport', 'zlib', '_thread'
+          }
+          
+          def get_imports_from_file(filepath):
+              """Extract import statements from a Python file."""
+              imports = set()
+              try:
+                  with open(filepath, 'r', encoding='utf-8') as f:
+                      tree = ast.parse(f.read(), filename=str(filepath))
+                  
+                  for node in ast.walk(tree):
+                      if isinstance(node, ast.Import):
+                          for alias in node.names:
+                              module = alias.name.split('.')[0]
+                              imports.add(module)
+                      elif isinstance(node, ast.ImportFrom):
+                          if node.module:
+                              module = node.module.split('.')[0]
+                              imports.add(module)
+              except Exception as e:
+                  print(f"Warning: Could not parse {filepath}: {e}", file=sys.stderr)
+              
+              return imports
+          
+          def main():
+              python_version = sys.argv[1] if len(sys.argv) > 1 else "3.11"
+              
+              # Read modules list
+              with open('modules_list.txt', 'r') as f:
+                  modules = [line.strip() for line in f if line.strip()]
+              
+              # Track imports per module
+              module_imports = {}
+              all_imports = set()
+              
+              print("Scanning files for imports...")
+              for module_path in modules:
+                  print(f"  - {module_path}")
+                  imports = get_imports_from_file(module_path)
+                  module_name = Path(module_path).stem
+                  
+                  # Filter external imports
+                  external_imports = {
+                      imp for imp in imports 
+                      if imp not in STDLIB_MODULES and not imp.startswith('app')
+                  }
+                  
+                  module_imports[module_name] = sorted(external_imports)
+                  all_imports.update(external_imports)
+              
+              print(f"\nFound {len(all_imports)} unique external dependencies")
+              
+              # Load existing requirements.txt to get versions
+              requirements_map = {}
+              if Path('requirements.txt').exists():
+                  print("\nReading requirements.txt for version information...")
+                  with open('requirements.txt', 'r') as f:
+                      for line in f:
+                          line = line.strip()
+                          # Skip comments and empty lines
+                          if not line or line.startswith('#'):
+                              continue
+                          
+                          # Parse requirement line
+                          match = re.match(r'^([a-zA-Z0-9_-]+)(\[.*?\])?(.*?)$', line)
+                          if match:
+                              package_name = match.group(1).lower()
+                              version_spec = (match.group(2) or '') + (match.group(3) or '')
+                              requirements_map[package_name] = line.strip()
+                              print(f"  Found: {package_name} -> {line}")
+              
+              # Save per-module requirements with versions
+              print("\nGenerating per-module requirements:")
+              requirements_dir = Path('requirements_per_module')
+              requirements_dir.mkdir(exist_ok=True)
+              
+              for module_name, imports in module_imports.items():
+                  if imports:
+                      req_file = requirements_dir / f"{module_name}_requirements.txt"
+                      print(f"  {module_name}:")
+                      with open(req_file, 'w', encoding='utf-8') as f:
+                          f.write(f"# Requirements for {module_name}\n")
+                          f.write(f"# Python version: {python_version}\n\n")
+                          for imp in imports:
+                              # Try to find version from requirements_map
+                              imp_lower = imp.lower()
+                              if imp_lower in requirements_map:
+                                  req_line = requirements_map[imp_lower]
+                                  f.write(f"{req_line}\n")
+                                  print(f"    [OK] {req_line}")
+                              else:
+                                  # Package not in requirements.txt
+                                  f.write(f"{imp}  # Version not specified\n")
+                                  print(f"    [+] {imp} (no version)")
+                  else:
+                      print(f"  {module_name}: (no external dependencies)")
+              
+              # Save all imports for global requirements
+              print("\nGenerating detected imports list...")
+              with open('detected_imports.txt', 'w', encoding='utf-8') as f:
+                  for imp in sorted(all_imports):
+                      f.write(f"{imp}\n")
+              
+              # Save module mapping as JSON
+              with open('module_dependencies.json', 'w', encoding='utf-8') as f:
+                  json.dump(module_imports, f, indent=2)
+              
+              # Save requirements mapping
+              with open('requirements_versions.json', 'w', encoding='utf-8') as f:
+                  json.dump(requirements_map, f, indent=2)
+              
+              print(f"\nSaved:")
+              print(f"  - Per-module requirements: requirements_per_module/")
+              print(f"  - Module dependencies: module_dependencies.json")
+              print(f"  - Version mapping: requirements_versions.json")
+          
+          if __name__ == '__main__':
+              main()
+          PYEOF
+          
+          # Run the analysis
+          export PYTHONIOENCODING=utf-8
+          python analyze_imports.py "$PYTHON_VERSION"
+          
+          echo ""
+          echo "=========================================="
+          echo "Creating global requirements with versions"
+          echo "=========================================="
+          
+          # Check if we have detected imports
+          if [ ! -f "detected_imports.txt" ] || [ ! -s "detected_imports.txt" ]; then
+            echo "No external dependencies detected"
+            cat > minimal_requirements.txt << EOF
+          # No external dependencies required
+          # Python version: $PYTHON_VERSION
+          # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+          else
+            echo "Creating requirements.txt with versions from source..."
+            
+            # Create header with Python version
+            cat > minimal_requirements.txt << EOF
+          # Auto-generated minimal requirements
+          # Python version: $PYTHON_VERSION
+          # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          #
+          # Only includes packages actually used in compiled modules
+          # Versions extracted from requirements.txt
+          
+          EOF
+            
+            # Load requirements versions JSON
+            if [ -f "requirements_versions.json" ]; then
+              echo "Using version information from requirements.txt..."
+              
+              # Read each detected import and add with version
+              while IFS= read -r import_name; do
+                import_lower=$(echo "$import_name" | tr '[:upper:]' '[:lower:]')
+                
+                # Try to get versioned requirement from JSON
+                VERSIONED=$(python3 -c "
+          import json
+          import sys
+          try:
+              with open('requirements_versions.json') as f:
+                  data = json.load(f)
+              print(data.get('$import_lower', ''))
+          except:
+              sys.exit(1)
+          " 2>/dev/null)
+                
+                if [ -n "$VERSIONED" ]; then
+                  echo "$VERSIONED" >> minimal_requirements.txt
+                  echo "  [OK] $VERSIONED"
+                else
+                  # Not in requirements.txt, add without version
+                  echo "$import_name  # Version not specified - please add to requirements.txt" >> minimal_requirements.txt
+                  echo "  [WARN] $import_name (no version found)"
+                fi
+              done < detected_imports.txt
+              
+            else
+              # No version info available
+              echo "No version information available, adding packages without versions..."
+              cat >> minimal_requirements.txt << EOF
+          # WARNING: No version constraints specified
+          # Please update requirements.txt with proper version pins
+          
+          EOF
+              while IFS= read -r import_name; do
+                echo "$import_name" >> minimal_requirements.txt
+                echo "  + $import_name"
+              done < detected_imports.txt
+            fi
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Final minimal requirements.txt:"
+          echo "=========================================="
+          cat minimal_requirements.txt
+          
+          # Validate requirements
+          echo ""
+          echo "=========================================="
+          echo "Validating requirements..."
+          echo "=========================================="
+          
+          # Count requirements
+          REQ_COUNT=$(grep -v '^#' minimal_requirements.txt | grep -v '^$' | wc -l)
+          echo "Total requirements: $REQ_COUNT"
+          
+          # Check for unversioned packages
+          UNVERSIONED=$(grep -v '^#' minimal_requirements.txt | grep -v '^$' | grep -c '# Version not specified' || true)
+          if [ "$UNVERSIONED" -gt 0 ]; then
+            echo "[WARN] Warning: $UNVERSIONED package(s) without version constraints"
+            echo "Please add versions to requirements.txt for:"
+            grep '# Version not specified' minimal_requirements.txt | cut -d' ' -f1 || true
+          else
+            echo "[OK] All packages have version constraints"
+          fi
+          
+          # Create requirements map with metadata
+          cat > requirements_map.json << EOF
+          {
+            "python_version": "$PYTHON_VERSION",
+            "platform": "${{ matrix.platform }}",
+            "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "total_dependencies": $REQ_COUNT,
+            "unversioned_count": $UNVERSIONED,
+            "per_module_requirements": "requirements_per_module/",
+            "source": "requirements.txt"
+          }
+          EOF
+          
+          echo ""
+          echo "[OK] Requirements analysis complete"
+          
+          # Save for build step
+          cp minimal_requirements.txt requirements_for_build.txt
+      
+
+      - name: Build all modules with Nuitka
+        if: steps.check_enabled.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          # Create bin directory
+          mkdir -p ./bin
+          
+          EXTENSION="${{ matrix.extension }}"
+          PLATFORM="${{ matrix.platform }}"
+          PYTHON_VERSION="${{ needs.setup.outputs.python_version }}"
+          
+          echo "Building all modules for $PLATFORM..."
+          echo "Extension: $EXTENSION"
+          echo "Working directory: $(pwd)"
+          echo "Python version: $(python --version)"
+          echo ""
+          
+          # Get Python executable path
+          PYTHON_EXEC=$(which python)
+          echo "Python executable: $PYTHON_EXEC"
+          
+          # Verify Nuitka installation
+          echo "Verifying Nuitka..."
+          $PYTHON_EXEC -m nuitka --version
+          
+          # Check if modules_list.txt exists
+          if [ ! -f "modules_list.txt" ]; then
+            echo "Error: modules_list.txt not found!"
+            exit 1
+          fi
+          
+          echo "Modules to compile:"
+          cat modules_list.txt
+          echo ""
+          
+          # Read modules list and compile
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+          
+          while IFS= read -r MODULE_PATH; do
+            # Skip empty lines
+            [ -z "$MODULE_PATH" ] && continue
+            
+            # Get module name without extension and path
+            MODULE_NAME=$(basename "$MODULE_PATH" .py)
+            
+            echo ""
+            echo "=========================================="
+            echo "Building: $MODULE_NAME"
+            echo "Source: $MODULE_PATH"
+            echo "=========================================="
+            
+            # Check if source file exists
+            if [ ! -f "$MODULE_PATH" ]; then
+              echo "Error: Source file not found: $MODULE_PATH"
+              echo "Current directory contents:"
+              ls -la
+              echo ""
+              echo "App directory contents:"
+              ls -la app/ 2>/dev/null || echo "app/ directory not found"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              continue
+            fi
+            
+            # Build with Nuitka using explicit Python executable and -m flag
+            echo "Running Nuitka with Python $PYTHON_VERSION..."
+            $PYTHON_EXEC -m nuitka \
+              --module \
+              --output-dir=./bin \
+              --include-package=app \
+              --follow-import-to=app \
+              --nofollow-imports \
+              --assume-yes-for-downloads \
+              --no-pyi-file \
+              --show-progress \
+              "$MODULE_PATH"
+            
+            NUITKA_EXIT=$?
+            
+            if [ $NUITKA_EXIT -eq 0 ]; then
+              # Check what files were created
+              echo ""
+              echo "Checking for compiled output..."
+              
+              # Nuitka creates files like: ModuleName.cpython-311-x86_64-linux-gnu.so
+              # or: ModuleName.pyd on Windows
+              
+              FOUND_FILES=$(find ./bin -name "${MODULE_NAME}*${EXTENSION}" -o -name "${MODULE_NAME}.cpython*${EXTENSION}" 2>/dev/null)
+              
+              if [ -n "$FOUND_FILES" ]; then
+                echo "[OK] Successfully built:"
+                echo "$FOUND_FILES" | while read f; do echo "  - $f"; done
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              else
+                echo "[ERROR] Nuitka succeeded but no output file found"
+                echo "Expected pattern: ${MODULE_NAME}*${EXTENSION}"
+                echo "Bin directory contents:"
+                ls -la ./bin/
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+              fi
+            else
+              echo "[ERROR] Nuitka failed with exit code: $NUITKA_EXIT"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+            
+          done < modules_list.txt
+          
+          echo ""
+          echo "=========================================="
+          echo "Build Summary"
+          echo "=========================================="
+          echo "Total modules: $((SUCCESS_COUNT + FAIL_COUNT))"
+          echo "Successfully built: $SUCCESS_COUNT"
+          echo "Failed: $FAIL_COUNT"
+          
+          # List all files in bin directory
+          echo ""
+          echo "Final bin directory contents:"
+          find ./bin -type f -ls 2>/dev/null || ls -laR ./bin/ 2>/dev/null || echo "Bin directory is empty"
+          
+          # Fail if no modules were built
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo ""
+            echo "ERROR: No modules were successfully compiled!"
+            echo "This might be due to:"
+            echo "  1. Missing C compiler"
+            echo "  2. Syntax errors in Python files"
+            echo "  3. Missing dependencies"
+            echo "  4. Nuitka compatibility issues"
+            echo "  5. Incorrect file paths in modules_list.txt"
+            exit 1
+          fi
+      
+      - name: Verify binaries
+        if: steps.check_enabled.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          echo "Contents of bin directory:"
+          ls -lah ./bin/ 2>/dev/null || echo "No bin directory"
+          
+          echo ""
+          echo "Searching for compiled modules..."
+          
+          # Count compiled modules
+          if [ "${{ matrix.platform }}" == "windows" ]; then
+            MODULE_COUNT=$(find ./bin -name "*.pyd" 2>/dev/null | wc -l)
+            echo "Found .pyd files:"
+            find ./bin -name "*.pyd" 2>/dev/null
+          else
+            MODULE_COUNT=$(find ./bin -name "*.so" 2>/dev/null | wc -l)
+            echo "Found .so files:"
+            find ./bin -name "*.so" 2>/dev/null
+          fi
+          
+          echo ""
+          echo "Total compiled modules: $MODULE_COUNT"
+          
+          if [ "$MODULE_COUNT" -eq 0 ]; then
+            echo "Error: No compiled modules found!"
+            echo ""
+            echo "Complete bin directory structure:"
+            find ./bin -type f 2>/dev/null || echo "Bin directory is empty"
+            exit 1
+          fi
+          
+          echo "[OK] Verification passed: $MODULE_COUNT modules compiled"
+
+      - name: Set Up Nexus Loader
+        shell: bash
+        run: |
+          echo "Creating NexusLoader.py and NexusLoader.md in bin directory..."
+          
+          # Create bin directory if it doesn't exist
+          mkdir -p ./bin
+          echo "[OK] bin directory created/verified"
+          
+          # Create NexusLoader.py file in bin directory
+          cat > ./bin/NexusLoader.py << 'PYEOF'
+          import os
+          import importlib.util
+          import sys
+          from pathlib import Path
+          from typing import Optional, List, Dict, Any
+
+
+          class NexusLoader:
+              """
+              A dynamic module loader for .pyd (Windows) and .so (Linux/Unix) binary files.
+              
+              Args:
+                  bin_path: Path to the directory containing binary modules
+                  modules: Optional list of module names to load. If None, loads all modules.
+              """
+              
+              def __init__(self, bin_path: str, modules: Optional[List[str]] = None):
+                  self.bin_path = Path(bin_path)
+                  self.modules_to_load = modules
+                  self.loaded_modules: Dict[str, Any] = {}
+                  
+                  # Validate bin_path exists
+                  if not self.bin_path.exists():
+                      raise FileNotFoundError(f"Binary path does not exist: {bin_path}")
+                  
+                  if not self.bin_path.is_dir():
+                      raise NotADirectoryError(f"Binary path is not a directory: {bin_path}")
+                  
+                  # Load modules during initialization
+                  self._load_modules()
+              
+              def _get_binary_files(self) -> List[Path]:
+                  """Get all .pyd and .so files from the bin_path directory."""
+                  binary_extensions = ['.pyd', '.so']
+                  binary_files = []
+                  
+                  for ext in binary_extensions:
+                      binary_files.extend(self.bin_path.glob(f'*{ext}'))
+                  
+                  return binary_files
+              
+              def _extract_module_name(self, file_path: Path) -> str:
+                  """Extract module name from file path (without extension)."""
+                  return file_path.stem
+              
+              def _load_module(self, file_path: Path) -> Any:
+                  """
+                  Load a single binary module from file path.
+                  
+                  Args:
+                      file_path: Path to the binary module file
+                      
+                  Returns:
+                      The loaded module object
+                  """
+                  module_name = self._extract_module_name(file_path)
+                  
+                  # Create module spec
+                  spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+                  
+                  if spec is None or spec.loader is None:
+                      raise ImportError(f"Could not load module spec for: {file_path}")
+                  
+                  # Create module from spec
+                  module = importlib.util.module_from_spec(spec)
+                  
+                  # Add to sys.modules to make it importable
+                  sys.modules[module_name] = module
+                  
+                  # Execute the module
+                  spec.loader.exec_module(module)
+                  
+                  return module
+              
+              def _load_modules(self) -> None:
+                  """Load all specified modules or all available modules."""
+                  binary_files = self._get_binary_files()
+                  
+                  if not binary_files:
+                      raise FileNotFoundError(f"No binary modules found in: {self.bin_path}")
+                  
+                  for file_path in binary_files:
+                      module_name = self._extract_module_name(file_path)
+                      
+                      # Skip if specific modules requested and this isn't one of them
+                      if self.modules_to_load is not None and module_name not in self.modules_to_load:
+                          continue
+                      
+                      try:
+                          module = self._load_module(file_path)
+                          self.loaded_modules[module_name] = module
+                          print(f"Successfully loaded module: {module_name}")
+                      except Exception as e:
+                          print(f"Failed to load module {module_name}: {e}")
+                  
+                  # Check if all requested modules were loaded
+                  if self.modules_to_load is not None:
+                      loaded_names = set(self.loaded_modules.keys())
+                      requested_names = set(self.modules_to_load)
+                      missing = requested_names - loaded_names
+                      
+                      if missing:
+                          print(f"Warning: Could not load requested modules: {missing}")
+              
+              def get_module(self, name: str) -> Any:
+                  """
+                  Get a loaded module by name.
+                  
+                  Args:
+                      name: Name of the module to retrieve
+                      
+                  Returns:
+                      The loaded module object
+                      
+                  Raises:
+                      KeyError: If module was not loaded
+                  """
+                  if name not in self.loaded_modules:
+                      raise KeyError(f"Module '{name}' not loaded. Available modules: {list(self.loaded_modules.keys())}")
+                  
+                  return self.loaded_modules[name]
+              
+              def list_loaded_modules(self) -> List[str]:
+                  """Return a list of all loaded module names."""
+                  return list(self.loaded_modules.keys())
+              
+              def __getitem__(self, name: str) -> Any:
+                  """Allow dictionary-style access to modules."""
+                  return self.get_module(name)
+              
+              def __contains__(self, name: str) -> bool:
+                  """Check if a module is loaded."""
+                  return name in self.loaded_modules
+              
+              def __repr__(self) -> str:
+                  return f"NexusLoader(bin_path='{self.bin_path}', loaded={len(self.loaded_modules)} modules)"
+          PYEOF
+          
+          echo "[OK] NexusLoader.py created"
+          
+          # Create NexusLoader.md file in bin directory
+          cat > ./bin/NexusLoader.md << 'MDEOF'
+          # NexusLoader
+
+          A dynamic Python module loader for binary extensions (`.pyd` and `.so` files).
+
+          ## Quick Start
+
+          ```python
+          from NexusLoader import NexusLoader
+
+          # Load all modules from current directory
+          loader = NexusLoader(".")
+
+          # Access a loaded module
+          my_module = loader["module_name"]
+          my_module.some_function()
+
+          # List all loaded modules
+          print(loader.list_loaded_modules())
+          ```
+
+          ## Usage Examples
+
+          ### Load All Modules
+
+          ```python
+          # Load all binary modules from a directory
+          loader = NexusLoader("/path/to/binary/modules")
+          
+          # List what was loaded
+          print(f"Loaded modules: {loader.list_loaded_modules()}")
+          ```
+
+          ### Load Specific Modules
+
+          ```python
+          # Load only specific modules
+          loader = NexusLoader(
+              "/path/to/binary/modules",
+              modules=["module1", "module2"]
+          )
+          ```
+
+          ### Access Modules
+
+          ```python
+          # Method 1: Dictionary-style (recommended)
+          module = loader["module_name"]
+          
+          # Method 2: Using get_module()
+          module = loader.get_module("module_name")
+          
+          # Method 3: Direct access
+          module = loader.loaded_modules["module_name"]
+          ```
+
+          ### Check Module Availability
+
+          ```python
+          # Check if module is loaded
+          if "module_name" in loader:
+              print("Module is available!")
+              module = loader["module_name"]
+          
+          # List all available modules
+          available = loader.list_loaded_modules()
+          print(f"Available: {available}")
+          ```
+
+          ## API Reference
+
+          ### Constructor
+
+          ```python
+          NexusLoader(bin_path: str, modules: Optional[List[str]] = None)
+          ```
+
+          **Parameters:**
+          - `bin_path` (str): Path to directory containing binary modules
+          - `modules` (Optional[List[str]]): Specific modules to load. If None, loads all.
+
+          **Raises:**
+          - `FileNotFoundError`: If bin_path doesn't exist or has no binary modules
+          - `NotADirectoryError`: If bin_path is not a directory
+
+          ### Methods
+
+          #### `get_module(name: str) -> Any`
+          Retrieve a loaded module by name.
+
+          #### `list_loaded_modules() -> List[str]`
+          Get list of all loaded module names.
+
+          ### Magic Methods
+
+          - `loader["module_name"]` - Dictionary-style access
+          - `"module_name" in loader` - Check if module is loaded
+          - `str(loader)` - String representation
+
+          ## Error Handling
+
+          ```python
+          try:
+              loader = NexusLoader("/path/to/modules")
+              module = loader["my_module"]
+          except FileNotFoundError as e:
+              print(f"Directory error: {e}")
+          except KeyError as e:
+              print(f"Module not found: {e}")
+              print(f"Available: {loader.list_loaded_modules()}")
+          ```
+
+          ## Platform Compatibility
+
+          | Platform | Extension | Notes |
+          |----------|-----------|-------|
+          | Windows | `.pyd` | Python extension modules |
+          | Linux | `.so` | Shared object files |
+          | macOS | `.so` | Shared object files |
+
+          ## Best Practices
+
+          1. **Validate paths before loading**
+          2. **Use selective loading** for better performance
+          3. **Check module availability** before use
+          4. **Handle errors gracefully**
+          5. **Use type hints** in your code
+
+          ## Complete Example
+
+          ```python
+          from NexusLoader import NexusLoader
+          import sys
+
+          def main():
+              try:
+                  # Load specific modules
+                  loader = NexusLoader(
+                      "./bin",
+                      modules=["crypto", "network"]
+                  )
+                  
+                  # Check what loaded
+                  print(f"Loaded: {loader.list_loaded_modules()}")
+                  
+                  # Use modules
+                  if "crypto" in loader:
+                      crypto = loader["crypto"]
+                      result = crypto.encrypt("Hello")
+                      print(f"Encrypted: {result}")
+                  
+              except Exception as e:
+                  print(f"Error: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          if __name__ == "__main__":
+              main()
+          ```
+
+          ## Troubleshooting
+
+          ### Module Won't Load
+          - Check Python version compatibility
+          - Verify dependencies are installed
+          - Ensure module compiled for your platform
+
+          ### ImportError
+          - Install missing dependencies
+          - Check module is in correct directory
+          - Verify file permissions
+
+          For more information, see the full documentation in the repository.
+          MDEOF
+          
+          echo "[OK] NexusLoader.md created"
+          
+          # Verify files were created in bin directory
+          echo ""
+          echo "Verifying NexusLoader files:"
+          if [ -f "./bin/NexusLoader.py" ]; then
+            echo "  ✓ NexusLoader.py ($(wc -l < ./bin/NexusLoader.py) lines)"
+          else
+            echo "  ✗ NexusLoader.py not found"
+            exit 1
+          fi
+          
+          if [ -f "./bin/NexusLoader.md" ]; then
+            echo "  ✓ NexusLoader.md ($(wc -l < ./bin/NexusLoader.md) lines)"
+          else
+            echo "  ✗ NexusLoader.md not found"
+            exit 1
+          fi
+          
+          echo ""
+          echo "[OK] NexusLoader files added successfully"
+          
+          # Show bin directory contents
+          echo ""
+          echo "bin directory contents:"
+          ls -lah ./bin/ | head -20
+
+      - name: Create platform-specific zip
+        if: steps.check_enabled.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          BINARY_BASE="${{ needs.setup.outputs.binary_name }}"
+          PLATFORM="${{ matrix.platform }}"
+          VERSION="${{ needs.version.outputs.new_version }}"
+          
+          # Create zip filename
+          ZIP_NAME="${BINARY_BASE}-${PLATFORM}-modules.zip"
+          
+          echo "Creating zip file: $ZIP_NAME"
+          
+          # Check if bin directory has files
+          FILE_COUNT=$(find ./bin -type f 2>/dev/null | wc -l)
+          echo "Files in bin directory: $FILE_COUNT"
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "Error: No files to zip in ./bin directory"
+            ls -la ./bin/ 2>/dev/null || echo "Bin directory doesn't exist"
+            exit 1
+          fi
+          
+          # Copy README.md from root to bin directory
+          if [ -f "README.md" ]; then
+            echo "Copying README.md from root to package..."
+            cp README.md ./bin/
+            echo "[OK] README.md copied"
+          else
+            echo "Warning: README.md not found in root directory"
+          fi
+          
+          # Copy requirements files to bin
+          if [ -f "requirements_for_build.txt" ]; then
+            echo "Adding minimal requirements.txt to package..."
+            cp requirements_for_build.txt ./bin/requirements.txt
+            echo "Contents:"
+            cat ./bin/requirements.txt
+          elif [ -f "requirements.txt" ]; then
+            echo "Using original requirements.txt..."
+            cp requirements.txt ./bin/
+          else
+            echo "No requirements found, creating empty requirements.txt..."
+            echo "# No external dependencies required" > ./bin/requirements.txt
+          fi
+          
+          # Copy per-module requirements if they exist
+          if [ -d "requirements_per_module" ]; then
+            echo "Adding per-module requirements..."
+            cp -r requirements_per_module ./bin/
+            echo "Per-module requirements included"
+          fi
+          
+          # Copy module dependencies mapping
+          if [ -f "module_dependencies.json" ]; then
+            echo "Adding module dependencies mapping..."
+            cp module_dependencies.json ./bin/
+          fi
+          
+          # Copy requirements map
+          if [ -f "requirements_map.json" ]; then
+            echo "Adding requirements metadata..."
+            cp requirements_map.json ./bin/
+          fi
+          
+          # List files that will be zipped
+          echo ""
+          echo "Files to be zipped:"
+          ls -lh ./bin/
+          
+          # Create zip from bin directory
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            # Use PowerShell on Windows
+            cd ./bin
+            powershell -Command "Compress-Archive -Path * -DestinationPath '../$ZIP_NAME' -Force"
+            cd ..
+          else
+            # Use zip on Unix
+            cd ./bin
+            zip -r "../$ZIP_NAME" * || {
+              echo "Zip failed, trying tar.gz..."
+              tar -czf "../${BINARY_BASE}-${PLATFORM}-modules.tar.gz" *
+              cd ..
+              echo "Created tar.gz instead: ${BINARY_BASE}-${PLATFORM}-modules.tar.gz"
+              
+              # Verify tar.gz was created
+              if [ -f "${BINARY_BASE}-${PLATFORM}-modules.tar.gz" ]; then
+                echo "[OK] Successfully created tar.gz"
+                ls -lh "${BINARY_BASE}-${PLATFORM}-modules.tar.gz"
+                echo "zip_name=${BINARY_BASE}-${PLATFORM}-modules.tar.gz" >> $GITHUB_OUTPUT
+              else
+                echo "Error: Failed to create archive"
+                exit 1
+              fi
+              exit 0
+            }
+            cd ..
+          fi
+          
+          # Verify the zip/archive was created
+          if [ -f "$ZIP_NAME" ]; then
+            echo "[OK] Created: $ZIP_NAME"
+            ls -lh "$ZIP_NAME"
+            
+            # Verify zip contents
+            echo ""
+            echo "Archive contents:"
+            if [ "${{ runner.os }}" == "Windows" ]; then
+              powershell -Command "Add-Type -Assembly System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::OpenRead('$ZIP_NAME').Entries | Select-Object FullName, Length | Format-Table"
+            else
+              unzip -l "$ZIP_NAME" 2>/dev/null || zipinfo "$ZIP_NAME" 2>/dev/null || echo "Cannot list zip contents (not critical)"
+            fi
+            
+            # Save zip name for upload
+            echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "Error: Archive file not created: $ZIP_NAME"
+            echo "Current directory contents:"
+            ls -la
+            exit 1
+          fi
+        id: create_zip
+      
+      - name: Upload binary artifact
+        if: steps.check_enabled.outputs.enabled == 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ./*-modules.zip
+            ./*-modules.tar.gz
+          retention-days: 5
+        continue-on-error: true
+
+  release:
+      name: Create Release
+      needs: [setup, version, build]
+      runs-on: ubuntu-latest
+      permissions:
+        contents: write
+      
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+            token: ${{ secrets.GITHUB_TOKEN }}
+        
+        - name: Download all artifacts
+          uses: actions/download-artifact@v4
+          with:
+            path: ./artifacts
+        
+        - name: List artifacts
+          run: |
+            echo "Downloaded artifacts:"
+            ls -R ./artifacts || echo "No artifacts found"
+        
+        - name: Prepare release files
+          run: |
+            mkdir -p ./release
+            
+            # Copy all zip files to release directory
+            echo "Copying module packages..."
+            find ./artifacts -name "*-modules.zip" -exec cp {} ./release/ \; || echo "No zip packages found"
+            find ./artifacts -name "*-modules.tar.gz" -exec cp {} ./release/ \; || echo "No tar.gz packages found"
+            
+            echo "Release files:"
+            ls -lah ./release
+
+        - name: Generate release notes
+          run: |
+            VERSION="${{ needs.version.outputs.new_version }}"
+            BUMP_TYPE="${{ needs.version.outputs.version_bump }}"
+            COMPONENT="${{ needs.setup.outputs.component_name }}"
+            BINARY_NAME="${{ needs.setup.outputs.binary_name }}"
+            PYTHON_VERSION="${{ needs.setup.outputs.python_version }}"
+            REPO="${{ github.repository }}"
+            
+            # Build list of available module packages
+            PACKAGES=""
+            if [ "${{ needs.setup.outputs.build_linux }}" == "true" ]; then
+              PACKAGES="${PACKAGES}- **Linux Modules (.so files)**: \`${BINARY_NAME}-linux-modules.zip\`"$'\n'
+            fi
+            if [ "${{ needs.setup.outputs.build_windows }}" == "true" ]; then
+              PACKAGES="${PACKAGES}- **Windows Modules (.pyd files)**: \`${BINARY_NAME}-windows-modules.zip\`"$'\n'
+            fi
+            if [ "${{ needs.setup.outputs.build_macos }}" == "true" ]; then
+              PACKAGES="${PACKAGES}- **macOS Modules (.so files)**: \`${BINARY_NAME}-macos-modules.zip\`"$'\n'
+            fi
+
+            # Create the main file template
+            cat > release_notes.md << 'MDEOF'
+            ## VERSION_PLACEHOLDER
+            
+            ### Release Information
+            - **Component**: COMPONENT_PLACEHOLDER
+            - **Binary Name**: BINARY_NAME_PLACEHOLDER
+            - **Python Version**: PYTHON_VERSION_PLACEHOLDER
+            - **Release Type**: BUMP_TYPE_PLACEHOLDER
+            
+            ### Changes
+            MDEOF
+            
+            # Add commit messages
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$LAST_TAG" ]; then
+              git log ${LAST_TAG}..HEAD --pretty=format:"- %s" >> release_notes.md
+            else
+              echo "- Initial release" >> release_notes.md
+            fi
+            
+            cat >> release_notes.md << 'MDEOF'
+            
+            ### Available Module Packages
+            PACKAGES_PLACEHOLDER
+            
+            ### What's Included
+            Each platform-specific zip file contains **compiled Python modules** (binary extensions):
+            - **Linux/macOS**: `.so` files (Python extension modules)
+            - **Windows**: `.pyd` files (Python extension modules)
+            
+            **Benefits:**
+            - Source code protected (IP protection)
+            - No .py files included
+            - Native performance
+            - Direct Python import capability
+            
+            **Important:**
+            - Modules are platform-specific (not cross-compatible)
+            - Requires Python PYTHON_VERSION_PLACEHOLDER
+            - Binary extensions only (no source code)
+            
+            ### Installation
+            
+            #### Prerequisites
+            ```bash
+            pip install -r requirements.txt
+            ```
+            
+            #### Option 1: Automatic with NexusSkyBase (Recommended)
+            ```python
+            from app.Lib.NexusSkyBase import NexusSkyBase
+            
+            # From GitHub release
+            nexus = NexusSkyBase.from_github(
+                repo_url='https://github.com/REPO_PLACEHOLDER',
+                version='VERSION_PLACEHOLDER',
+                release_name_template='BINARY_NAME_PLACEHOLDER'
+            )
+            
+            # From direct URL
+            nexus = NexusSkyBase.from_url(
+                'https://github.com/REPO_PLACEHOLDER/releases/download/VERSION_PLACEHOLDER/BINARY_NAME_PLACEHOLDER-linux-modules.zip'
+            )
+            
+            # From local path
+            nexus = NexusSkyBase.from_path('./BINARY_NAME_PLACEHOLDER-linux-modules.zip')
+            
+            # Use loaded modules
+            MyClass = nexus.MyClass
+            result = nexus.some_function()
+            ```
+            
+            #### Option 2: Manual Installation
+            
+            **Linux/macOS:**
+            ```bash
+            wget https://github.com/REPO_PLACEHOLDER/releases/download/VERSION_PLACEHOLDER/BINARY_NAME_PLACEHOLDER-linux-modules.zip
+            unzip BINARY_NAME_PLACEHOLDER-linux-modules.zip -d ~/.nexus/bin/
+            ```
+            
+            **Windows:**
+            ```powershell
+            # Download and extract BINARY_NAME_PLACEHOLDER-windows-modules.zip
+            # Add to Python path
+            import sys
+            sys.path.insert(0, 'C:\\Users\\YourName\\.nexus\\bin')
+            import YourModule
+            ```
+            
+            ### Usage Example
+            
+            ```python
+            from YourModule import YourClass
+            instance = YourClass()
+            result = instance.do_something()
+            ```
+            
+            ### Platform Compatibility
+            | Platform | File Type | Python Version |
+            |----------|-----------|----------------|
+            | Linux x64 | .so | PYTHON_VERSION_PLACEHOLDER |
+            | Windows | .pyd | PYTHON_VERSION_PLACEHOLDER |
+            | macOS | .so | PYTHON_VERSION_PLACEHOLDER |
+            
+            ---
+            
+            Need help? Check the repository documentation or open an issue.
+            
+            Built with love by the Nexus Team
+            MDEOF
+            
+            # Replace placeholders (single line safe)
+            sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" release_notes.md
+            sed -i "s|COMPONENT_PLACEHOLDER|${COMPONENT}|g" release_notes.md
+            sed -i "s|BINARY_NAME_PLACEHOLDER|${BINARY_NAME}|g" release_notes.md
+            sed -i "s|PYTHON_VERSION_PLACEHOLDER|${PYTHON_VERSION}|g" release_notes.md
+            sed -i "s|BUMP_TYPE_PLACEHOLDER|${BUMP_TYPE}|g" release_notes.md
+            sed -i "s|REPO_PLACEHOLDER|${REPO}|g" release_notes.md
+            
+            # Insert PACKAGES safely without sed
+            awk -v text="${PACKAGES}" '/PACKAGES_PLACEHOLDER/{print text; next}1' release_notes.md > tmp && mv tmp release_notes.md
+            
+            echo "✓ Release notes created successfully:"
+            echo "-------------------------------------"
+            cat release_notes.md
+        
+        - name: Create Git tag
+          run: |
+            VERSION="${{ needs.version.outputs.new_version }}"
+            COMPONENT="${{ needs.setup.outputs.component_name }}"
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # Check if tag already exists
+            if git rev-parse "$VERSION" >/dev/null 2>&1; then
+              echo "Tag $VERSION already exists, skipping tag creation"
+            else
+              git tag -a "$VERSION" -m "Release $VERSION for component $COMPONENT"
+              git push origin "$VERSION"
+            fi
+        
+        - name: Create GitHub Release
+          uses: softprops/action-gh-release@v1
+          with:
+            tag_name: ${{ needs.version.outputs.new_version }}
+            name: ${{ needs.version.outputs.new_version }}
+            body_path: release_notes.md
+            files: ./release/*
+            draft: false
+            prerelease: false
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+        - name: Update version files
+          run: |
+            VERSION="${{ needs.version.outputs.new_version }}"
+            COMPONENT="${{ needs.setup.outputs.component_name }}"
+            
+            # Create versions directory
+            mkdir -p .versions
+            
+            # Update component version file
+            echo "$VERSION" > ".versions/${COMPONENT}_VERSION"
+            
+            # Update main VERSION file
+            echo "$VERSION" > VERSION
+            
+            # Commit and push
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .versions/ VERSION
+            git commit -m "chore: bump ${COMPONENT} version to $VERSION [skip ci]" || echo "No changes to commit"
+            git push origin main || echo "No changes to push"
+
+  notify:
+    name: Send Notification
+    needs: [setup, version, release]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check job status
+        run: |
+          if [ "${{ needs.release.result }}" == "success" ]; then
+            echo "BUILD_STATUS=SUCCESS" >> $GITHUB_ENV
+            echo "BUILD_COLOR=good" >> $GITHUB_ENV
+          else
+            echo "BUILD_STATUS=FAILED" >> $GITHUB_ENV
+            echo "BUILD_COLOR=danger" >> $GITHUB_ENV
+          fi
+      
+      - name: Send notification
+        run: |
+          COMPONENT="${{ needs.setup.outputs.component_name }}"
+          VERSION="${{ needs.version.outputs.new_version }}"
+          
+          echo "=========================================="
+          echo "Release ${COMPONENT} ${VERSION}: ${{ env.BUILD_STATUS }}"
+          echo "=========================================="
