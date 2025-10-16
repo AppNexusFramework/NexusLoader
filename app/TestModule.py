@@ -7,7 +7,7 @@ def func_validator(licenses):
     else:
         return False
             
-class Test:
+class TestClass:
     """
     A dynamic module loader for .pyd (Windows) and .so (Linux/Unix) binary files.
     
