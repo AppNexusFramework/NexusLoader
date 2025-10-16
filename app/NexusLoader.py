@@ -29,7 +29,7 @@ class Test:
         print("func2 executed")
         pass
 
-    NexusDecorators.allow_cli_license(func_validator(["free", "pro"]))
+    NexusDecorators.allow_license(func_validator(["free", "pro"]))
     def func3(self):
         print("func3 executed")
 

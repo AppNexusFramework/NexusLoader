@@ -478,57 +478,95 @@ jobs:
                   
                   return params
               
-              def _is_cli_decorated(self, func_node: ast.FunctionDef) -> bool:
-                  """Check if function has CLI-related decorators."""
-                  cli_decorators = {'click.command', 'command', 'cli', 'typer.command'}
+              def _check_nexus_decorator(self, class_body: List, func_index: int, decorator_names: List[str]) -> bool:
+                  """
+                  Check if the statement before a function is a NexusDecorators attribute access.
+                  This handles the pattern:
+                      NexusDecorators.allow_cli
+                      def func1(self):
                   
+                  Args:
+                      class_body: List of nodes in the class body
+                      func_index: Index of the function in class_body
+                      decorator_names: List of decorator attribute names to match
+                  """
+                  if func_index == 0:
+                      return False
+                  
+                  # Check the previous statement
+                  prev_node = class_body[func_index - 1]
+                  
+                  # Check if it's an Expr containing an Attribute or Call
+                  if isinstance(prev_node, ast.Expr):
+                      # Pattern: NexusDecorators.allow_cli (simple attribute access)
+                      if isinstance(prev_node.value, ast.Attribute):
+                          if (hasattr(prev_node.value.value, 'id') and 
+                              prev_node.value.value.id == 'NexusDecorators' and
+                              prev_node.value.attr in decorator_names):
+                              return True
+                      
+                      # Pattern: NexusDecorators.allow_license(...) (function call)
+                      elif isinstance(prev_node.value, ast.Call):
+                          if isinstance(prev_node.value.func, ast.Attribute):
+                              if (hasattr(prev_node.value.func.value, 'id') and 
+                                  prev_node.value.func.value.id == 'NexusDecorators' and
+                                  prev_node.value.func.attr in decorator_names):
+                                  return True
+                  
+                  return False
+              
+              def _is_cli_method(self, class_body: List, func_index: int, func_node: ast.FunctionDef) -> bool:
+                  """Check if method has CLI decorator."""
+                  # Check traditional @decorators
                   for decorator in func_node.decorator_list:
                       if isinstance(decorator, ast.Name):
-                          if decorator.id in cli_decorators or 'cli' in decorator.id.lower():
+                          if 'cli' in decorator.id.lower():
                               return True
                       elif isinstance(decorator, ast.Attribute):
-                          full_name = f"{decorator.value.id if hasattr(decorator.value, 'id') else ''}.{decorator.attr}"
-                          if full_name in cli_decorators or 'cli' in full_name.lower():
+                          if 'cli' in decorator.attr.lower():
                               return True
                       elif isinstance(decorator, ast.Call):
-                          if isinstance(decorator.func, ast.Name):
-                              if decorator.func.id in cli_decorators or 'cli' in decorator.func.id.lower():
-                                  return True
-                          elif isinstance(decorator.func, ast.Attribute):
+                          if isinstance(decorator.func, ast.Attribute):
                               if 'cli' in decorator.func.attr.lower():
                                   return True
                   
+                  # Check NexusDecorators.allow_cli pattern
+                  cli_decorators = ['allow_cli', 'allow_cli_license']
+                  if self._check_nexus_decorator(class_body, func_index, cli_decorators):
+                      return True
+                  
                   return False
               
-              def _is_rest_decorated(self, func_node: ast.FunctionDef) -> bool:
-                  """Check if function has REST API decorators."""
-                  rest_decorators = {
+              def _is_rest_method(self, class_body: List, func_index: int, func_node: ast.FunctionDef) -> bool:
+                  """Check if method has REST API decorator."""
+                  rest_decorator_names = {
                       'route', 'get', 'post', 'put', 'delete', 'patch',
-                      'app.route', 'api.route', 'router.get', 'router.post',
-                      'router.put', 'router.delete', 'router.patch',
-                      'fastapi', 'flask'
+                      'app.route', 'api.route', 'restapi'
                   }
                   
+                  # Check traditional @decorators
                   for decorator in func_node.decorator_list:
                       if isinstance(decorator, ast.Name):
-                          if decorator.id in rest_decorators:
+                          if decorator.id in rest_decorator_names or 'rest' in decorator.id.lower():
                               return True
                       elif isinstance(decorator, ast.Attribute):
-                          if decorator.attr in rest_decorators:
+                          if decorator.attr in rest_decorator_names or 'rest' in decorator.attr.lower():
                               return True
                       elif isinstance(decorator, ast.Call):
-                          if isinstance(decorator.func, ast.Name):
-                              if decorator.func.id in rest_decorators:
+                          if isinstance(decorator.func, ast.Attribute):
+                              if decorator.func.attr in rest_decorator_names or 'rest' in decorator.func.attr.lower():
                                   return True
-                          elif isinstance(decorator.func, ast.Attribute):
-                              if decorator.func.attr in rest_decorators:
-                                  return True
+                  
+                  # Check NexusDecorators.allow_restapi pattern
+                  rest_nexus_decorators = ['allow_restapi', 'allow_restapi_license']
+                  if self._check_nexus_decorator(class_body, func_index, rest_nexus_decorators):
+                      return True
                   
                   return False
               
-              def _is_licensed(self, func_node: ast.FunctionDef) -> bool:
-                  """Check if function has license-related decorators or comments."""
-                  # Check decorators
+              def _is_licensed_method(self, class_body: List, func_index: int, func_node: ast.FunctionDef) -> bool:
+                  """Check if method requires license."""
+                  # Check traditional @decorators
                   for decorator in func_node.decorator_list:
                       if isinstance(decorator, ast.Name):
                           if 'license' in decorator.id.lower() or 'premium' in decorator.id.lower():
@@ -537,6 +575,11 @@ jobs:
                           if isinstance(decorator.func, ast.Name):
                               if 'license' in decorator.func.id.lower() or 'premium' in decorator.func.id.lower():
                                   return True
+                  
+                  # Check NexusDecorators with "license" in the name
+                  license_nexus_decorators = ['allow_license', 'allow_cli_license', 'allow_restapi_license', 'require_license']
+                  if self._check_nexus_decorator(class_body, func_index, license_nexus_decorators):
+                      return True
                   
                   # Check docstring
                   docstring = ast.get_docstring(func_node)
@@ -547,23 +590,31 @@ jobs:
                   
                   return False
               
-              def _extract_class_info(self, class_node: ast.ClassDef) -> Dict[str, Dict[str, str]]:
+              def _extract_class_info(self, class_node: ast.ClassDef) -> Dict[str, Any]:
                   """Extract methods and their parameters from a class."""
-                  methods = {}
+                  methods_info = {}
                   
-                  for node in class_node.body:
+                  for idx, node in enumerate(class_node.body):
                       if isinstance(node, ast.FunctionDef):
-                          # Skip private methods
+                          # Skip private methods (but allow __init__, __str__, etc.)
                           if node.name.startswith('_') and not node.name.startswith('__'):
                               continue
                           
                           params = self._extract_function_params(node)
                           
-                          # Only include if it has parameters or is a public method
-                          if params or not node.name.startswith('_'):
-                              methods[node.name] = params
+                          # Determine categories
+                          is_cli = self._is_cli_method(class_node.body, idx, node)
+                          is_rest = self._is_rest_method(class_node.body, idx, node)
+                          is_licensed = self._is_licensed_method(class_node.body, idx, node)
+                          
+                          methods_info[node.name] = {
+                              'params': params,
+                              'is_cli': is_cli,
+                              'is_rest': is_rest,
+                              'is_licensed': is_licensed
+                          }
                   
-                  return methods
+                  return methods_info
               
               def analyze_file(self, filepath: Path):
                   """Analyze a Python file and extract API information."""
@@ -580,58 +631,39 @@ jobs:
                   for node in ast.walk(tree):
                       if isinstance(node, ast.ClassDef):
                           class_name = node.name
-                          methods = self._extract_class_info(node)
+                          methods_info = self._extract_class_info(node)
                           
-                          if not methods:
+                          if not methods_info:
                               continue
                           
-                          # Check each method for decorators
-                          for method_node in node.body:
-                              if isinstance(method_node, ast.FunctionDef):
-                                  method_name = method_node.name
-                                  
-                                  # Skip private methods
-                                  if method_name.startswith('_') and not method_name.startswith('__'):
-                                      continue
-                                  
-                                  if method_name not in methods:
-                                      continue
-                                  
-                                  # Categorize based on decorators
-                                  is_cli = self._is_cli_decorated(method_node)
-                                  is_rest = self._is_rest_decorated(method_node)
-                                  is_licensed = self._is_licensed(method_node)
-                                  
-                                  method_info = {method_name: methods[method_name]}
-                                  
-                                  # Add to appropriate categories
-                                  if is_cli:
+                          # Categorize methods
+                          for method_name, info in methods_info.items():
+                              params = info['params']
+                              
+                              # Add to CLI APIs
+                              if info['is_cli']:
+                                  if class_name not in self.cli_apis:
+                                      self.cli_apis[class_name] = {}
+                                  self.cli_apis[class_name][method_name] = params
+                              
+                              # Add to REST APIs
+                              if info['is_rest']:
+                                  if class_name not in self.rest_apis:
+                                      self.rest_apis[class_name] = {}
+                                  self.rest_apis[class_name][method_name] = params
+                              
+                              # Add to Licensed APIs
+                              if info['is_licensed']:
+                                  if class_name not in self.licensed_apis:
+                                      self.licensed_apis[class_name] = {}
+                                  self.licensed_apis[class_name][method_name] = params
+                              
+                              # If no decorator found, add public methods to CLI by default
+                              if not (info['is_cli'] or info['is_rest'] or info['is_licensed']):
+                                  if not method_name.startswith('_'):
                                       if class_name not in self.cli_apis:
                                           self.cli_apis[class_name] = {}
-                                      self.cli_apis[class_name].update(method_info)
-                                  
-                                  if is_rest:
-                                      if class_name not in self.rest_apis:
-                                          self.rest_apis[class_name] = {}
-                                      self.rest_apis[class_name].update(method_info)
-                                  
-                                  if is_licensed:
-                                      if class_name not in self.licensed_apis:
-                                          self.licensed_apis[class_name] = {}
-                                      self.licensed_apis[class_name].update(method_info)
-                                  
-                                  # If no specific decorator, add to all for completeness
-                                  if not (is_cli or is_rest or is_licensed):
-                                      # Add public methods to CLI by default
-                                      if not method_name.startswith('_'):
-                                          if class_name not in self.cli_apis:
-                                              self.cli_apis[class_name] = {}
-                                          self.cli_apis[class_name].update(method_info)
-                          
-                          # If class has no decorated methods, add all public methods to CLI
-                          if class_name not in self.cli_apis and class_name not in self.rest_apis:
-                              if methods:
-                                  self.cli_apis[class_name] = methods
+                                      self.cli_apis[class_name][method_name] = params
               
               def generate_json_files(self, output_dir: Path):
                   """Generate the three JSON files."""
@@ -641,19 +673,19 @@ jobs:
                   cli_path = output_dir / 'cli.json'
                   with open(cli_path, 'w', encoding='utf-8') as f:
                       json.dump(self.cli_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {cli_path}")
+                  print(f"✓ Generated: {cli_path} ({len(self.cli_apis)} classes)")
                   
                   # Write rest.json
                   rest_path = output_dir / 'rest.json'
                   with open(rest_path, 'w', encoding='utf-8') as f:
                       json.dump(self.rest_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {rest_path}")
+                  print(f"✓ Generated: {rest_path} ({len(self.rest_apis)} classes)")
                   
                   # Write licensed.json
                   licensed_path = output_dir / 'licensed.json'
                   with open(licensed_path, 'w', encoding='utf-8') as f:
                       json.dump(self.licensed_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {licensed_path}")
+                  print(f"✓ Generated: {licensed_path} ({len(self.licensed_apis)} classes)")
           
           
           def main():
@@ -679,10 +711,12 @@ jobs:
               generator.generate_json_files(output_dir)
               
               print("")
+              print("========================================")
               print("Summary:")
-              print(f"  CLI APIs: {len(generator.cli_apis)} classes")
-              print(f"  REST APIs: {len(generator.rest_apis)} classes")
-              print(f"  Licensed APIs: {len(generator.licensed_apis)} classes")
+              print(f"  CLI APIs: {len(generator.cli_apis)} classes, {sum(len(methods) for methods in generator.cli_apis.values())} methods")
+              print(f"  REST APIs: {len(generator.rest_apis)} classes, {sum(len(methods) for methods in generator.rest_apis.values())} methods")
+              print(f"  Licensed APIs: {len(generator.licensed_apis)} classes, {sum(len(methods) for methods in generator.licensed_apis.values())} methods")
+              print("========================================")
           
           
           if __name__ == '__main__':
@@ -698,29 +732,17 @@ jobs:
           echo "API Documentation Files Created"
           echo "=========================================="
           
-          # Display file contents
-          if [ -f "./bin/cli.json" ]; then
-            echo ""
-            echo "cli.json preview:"
-            head -30 ./bin/cli.json
-          fi
+          # Display file contents preview
+          for json_file in cli.json rest.json licensed.json; do
+            if [ -f "./bin/$json_file" ]; then
+              echo ""
+              echo "--- $json_file preview ---"
+              head -50 "./bin/$json_file"
+              echo ""
+            fi
+          done
           
-          if [ -f "./bin/rest.json" ]; then
-            echo ""
-            echo "rest.json preview:"
-            head -30 ./bin/rest.json
-          fi
-          
-          if [ -f "./bin/licensed.json" ]; then
-            echo ""
-            echo "licensed.json preview:"
-            head -30 ./bin/licensed.json
-          fi
-          
-          echo ""
           echo "[OK] API documentation generation complete"
-
-
 
       - name: Analyze imports and create minimal requirements
         if: steps.check_enabled.outputs.enabled == 'true'
