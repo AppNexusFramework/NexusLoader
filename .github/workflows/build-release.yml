@@ -436,9 +436,7 @@ jobs:
               """Generates API documentation JSONs from Python source files."""
               
               def __init__(self):
-                  self.cli_apis = {}
-                  self.rest_apis = {}
-                  self.licensed_apis = {}
+                  self.modules_data = {}  # {module_name: {cli: {}, rest: {}, licensed: {}}}
               
               def _get_type_annotation(self, annotation) -> str:
                   """Extract type from annotation node."""
@@ -627,6 +625,14 @@ jobs:
                   
                   module_name = filepath.stem
                   
+                  # Initialize module data structure
+                  if module_name not in self.modules_data:
+                      self.modules_data[module_name] = {
+                          'cli': {},
+                          'rest': {},
+                          'licensed': {}
+                      }
+                  
                   # Process classes
                   for node in ast.walk(tree):
                       if isinstance(node, ast.ClassDef):
@@ -642,50 +648,69 @@ jobs:
                               
                               # Add to CLI APIs
                               if info['is_cli']:
-                                  if class_name not in self.cli_apis:
-                                      self.cli_apis[class_name] = {}
-                                  self.cli_apis[class_name][method_name] = params
+                                  if class_name not in self.modules_data[module_name]['cli']:
+                                      self.modules_data[module_name]['cli'][class_name] = {}
+                                  self.modules_data[module_name]['cli'][class_name][method_name] = params
                               
                               # Add to REST APIs
                               if info['is_rest']:
-                                  if class_name not in self.rest_apis:
-                                      self.rest_apis[class_name] = {}
-                                  self.rest_apis[class_name][method_name] = params
+                                  if class_name not in self.modules_data[module_name]['rest']:
+                                      self.modules_data[module_name]['rest'][class_name] = {}
+                                  self.modules_data[module_name]['rest'][class_name][method_name] = params
                               
                               # Add to Licensed APIs
                               if info['is_licensed']:
-                                  if class_name not in self.licensed_apis:
-                                      self.licensed_apis[class_name] = {}
-                                  self.licensed_apis[class_name][method_name] = params
+                                  if class_name not in self.modules_data[module_name]['licensed']:
+                                      self.modules_data[module_name]['licensed'][class_name] = {}
+                                  self.modules_data[module_name]['licensed'][class_name][method_name] = params
                               
                               # If no decorator found, add public methods to CLI by default
                               if not (info['is_cli'] or info['is_rest'] or info['is_licensed']):
                                   if not method_name.startswith('_'):
-                                      if class_name not in self.cli_apis:
-                                          self.cli_apis[class_name] = {}
-                                      self.cli_apis[class_name][method_name] = params
+                                      if class_name not in self.modules_data[module_name]['cli']:
+                                          self.modules_data[module_name]['cli'][class_name] = {}
+                                      self.modules_data[module_name]['cli'][class_name][method_name] = params
               
               def generate_json_files(self, output_dir: Path):
-                  """Generate the three JSON files."""
+                  """Generate JSON files per module in the format: modulename.nexus.{cli|rest|licensed}"""
                   output_dir.mkdir(exist_ok=True)
                   
-                  # Write cli.json
-                  cli_path = output_dir / 'cli.json'
-                  with open(cli_path, 'w', encoding='utf-8') as f:
-                      json.dump(self.cli_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {cli_path} ({len(self.cli_apis)} classes)")
+                  total_files = 0
+                  total_cli = 0
+                  total_rest = 0
+                  total_licensed = 0
                   
-                  # Write rest.json
-                  rest_path = output_dir / 'rest.json'
-                  with open(rest_path, 'w', encoding='utf-8') as f:
-                      json.dump(self.rest_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {rest_path} ({len(self.rest_apis)} classes)")
+                  for module_name, module_data in self.modules_data.items():
+                      # Generate modulename.nexus.cli
+                      cli_path = output_dir / f'{module_name}.nexus.cli'
+                      with open(cli_path, 'w', encoding='utf-8') as f:
+                          json.dump(module_data['cli'], f, indent=2, ensure_ascii=False)
+                      cli_count = sum(len(methods) for methods in module_data['cli'].values())
+                      print(f"✓ Generated: {cli_path} ({len(module_data['cli'])} classes, {cli_count} methods)")
+                      total_cli += cli_count
+                      total_files += 1
+                      
+                      # Generate modulename.nexus.rest
+                      rest_path = output_dir / f'{module_name}.nexus.rest'
+                      with open(rest_path, 'w', encoding='utf-8') as f:
+                          json.dump(module_data['rest'], f, indent=2, ensure_ascii=False)
+                      rest_count = sum(len(methods) for methods in module_data['rest'].values())
+                      print(f"✓ Generated: {rest_path} ({len(module_data['rest'])} classes, {rest_count} methods)")
+                      total_rest += rest_count
+                      total_files += 1
+                      
+                      # Generate modulename.nexus.licensed
+                      licensed_path = output_dir / f'{module_name}.nexus.licensed'
+                      with open(licensed_path, 'w', encoding='utf-8') as f:
+                          json.dump(module_data['licensed'], f, indent=2, ensure_ascii=False)
+                      licensed_count = sum(len(methods) for methods in module_data['licensed'].values())
+                      print(f"✓ Generated: {licensed_path} ({len(module_data['licensed'])} classes, {licensed_count} methods)")
+                      total_licensed += licensed_count
+                      total_files += 1
+                      
+                      print("")
                   
-                  # Write licensed.json
-                  licensed_path = output_dir / 'licensed.json'
-                  with open(licensed_path, 'w', encoding='utf-8') as f:
-                      json.dump(self.licensed_apis, f, indent=2, ensure_ascii=False)
-                  print(f"✓ Generated: {licensed_path} ({len(self.licensed_apis)} classes)")
+                  return total_files, total_cli, total_rest, total_licensed
           
           
           def main():
@@ -705,17 +730,19 @@ jobs:
               
               print("")
               print("Generating JSON files...")
+              print("")
               
               # Generate JSON files in bin directory
               output_dir = Path('./bin')
-              generator.generate_json_files(output_dir)
+              total_files, total_cli, total_rest, total_licensed = generator.generate_json_files(output_dir)
               
-              print("")
               print("========================================")
               print("Summary:")
-              print(f"  CLI APIs: {len(generator.cli_apis)} classes, {sum(len(methods) for methods in generator.cli_apis.values())} methods")
-              print(f"  REST APIs: {len(generator.rest_apis)} classes, {sum(len(methods) for methods in generator.rest_apis.values())} methods")
-              print(f"  Licensed APIs: {len(generator.licensed_apis)} classes, {sum(len(methods) for methods in generator.licensed_apis.values())} methods")
+              print(f"  Total files generated: {total_files}")
+              print(f"  Modules processed: {len(generator.modules_data)}")
+              print(f"  Total CLI methods: {total_cli}")
+              print(f"  Total REST methods: {total_rest}")
+              print(f"  Total Licensed methods: {total_licensed}")
               print("========================================")
           
           
@@ -732,15 +759,13 @@ jobs:
           echo "API Documentation Files Created"
           echo "=========================================="
           
-          # Display file contents preview
-          for json_file in cli.json rest.json licensed.json; do
-            if [ -f "./bin/$json_file" ]; then
-              echo ""
-              echo "--- $json_file preview ---"
-              head -50 "./bin/$json_file"
-              echo ""
-            fi
-          done
+          # Display file listing
+          if [ -d "./bin" ]; then
+            echo ""
+            echo "Generated files:"
+            ls -lh ./bin/*.nexus.* 2>/dev/null || echo "No .nexus.* files found"
+            echo ""
+          fi
           
           echo "[OK] API documentation generation complete"
 
