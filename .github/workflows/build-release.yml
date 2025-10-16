@@ -1615,13 +1615,13 @@ jobs:
             # Build list of available module packages
             PACKAGES=""
             if [ "${{ needs.setup.outputs.build_linux }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **Linux Modules (.so files)**: \`${BINARY_NAME}-linux-modules.zip\`"\n'
+              PACKAGES="${PACKAGES}- **Linux Modules (.so files)**: \`${BINARY_NAME}-linux-modules.zip\`"$'\n'
             fi
             if [ "${{ needs.setup.outputs.build_windows }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **Windows Modules (.pyd files)**: \`${BINARY_NAME}-windows-modules.zip\`"\n'
+              PACKAGES="${PACKAGES}- **Windows Modules (.pyd files)**: \`${BINARY_NAME}-windows-modules.zip\`"$'\n'
             fi
             if [ "${{ needs.setup.outputs.build_macos }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **macOS Modules (.so files)**: \`${BINARY_NAME}-macos-modules.zip\`"\n'
+              PACKAGES="${PACKAGES}- **macOS Modules (.so files)**: \`${BINARY_NAME}-macos-modules.zip\`"$'\n'
             fi
 
             # Create the main file template
