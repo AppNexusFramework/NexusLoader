@@ -1,28 +1,15 @@
+# test.py
+from NexusFramework import ModuleManager
 
+mm = ModuleManager(verbose=True)
 
-import os
-import sys
-import ctypes
+# Load the module
+test_module = mm.load_module("TestModule")
 
-# Add your DLL directory before importing
-os.add_dll_directory(r"C:\Users\Software Engineering\.nexus\bin")
+# Use classes from the module
+TestClass = test_module.TestClass
+instance = TestClass()
 
-# Print diagnostic info
-print("sys.path:")
-for p in sys.path:
-    print("  ", p)
-
-print("\nPATH:")
-for p in os.environ["PATH"].split(";"):
-    print("  ", p)
-
-
-
-# ✅ Correct import syntax
-from NexusFramework.NexusLoader import NexusLoader
-
-# Initialize the loader
-loader = NexusLoader(r"C:\Users\Software Engineering\.nexus\bin", verbose=True)
-
-# Print loaded modules info
-print(loader.loaded_modules)
+# Or get class directly
+TestClass = mm.get_class("TestModule", "TestClass")
+instance = TestClass()

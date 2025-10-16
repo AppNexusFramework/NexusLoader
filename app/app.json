@@ -2,7 +2,7 @@
   "version_bump": "patch",
   "component_name": "NexusLoader",
   "binary_base_name": "nexus-loader",
-  "python_version": "3.11",
+  "python_version": "3.13",
   "build_targets": {
     "linux": true,
     "windows": true,
