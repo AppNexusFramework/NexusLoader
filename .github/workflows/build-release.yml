@@ -888,25 +888,24 @@ jobs:
                               continue
                           
                           # Parse requirement line
-                          match = re.match(r'^([a-zA-Z0-9_-]+)(\[.*?\])?(.*?)$', line)
+                          match = re.match(r'^([a-zA-Z0-9_-]+)(\[.*?\])?(.*?), line)
                           if match:
                               package_name = match.group(1).lower()
                               version_spec = (match.group(2) or '') + (match.group(3) or '')
                               requirements_map[package_name] = line.strip()
                               print(f"  Found: {package_name} -> {line}")
               
-              # Save per-module requirements with versions
+              # Save per-module requirements with versions (NEW FORMAT: modulename.nexus.requirements)
               print("\nGenerating per-module requirements:")
-              requirements_dir = Path('requirements_per_module')
-              requirements_dir.mkdir(exist_ok=True)
               
               for module_name, imports in module_imports.items():
                   if imports:
-                      req_file = requirements_dir / f"{module_name}_requirements.txt"
+                      # NEW: Use .nexus.requirements format
+                      req_file = Path('./bin') / f"{module_name}.nexus.requirements"
+                      req_file.parent.mkdir(exist_ok=True)
+                      
                       print(f"  {module_name}:")
                       with open(req_file, 'w', encoding='utf-8') as f:
-                          f.write(f"# Requirements for {module_name}\n")
-                          f.write(f"# Python version: {python_version}\n\n")
                           for imp in imports:
                               # Try to find version from requirements_map
                               imp_lower = imp.lower()
@@ -916,29 +915,22 @@ jobs:
                                   print(f"    [OK] {req_line}")
                               else:
                                   # Package not in requirements.txt
-                                  f.write(f"{imp}  # Version not specified\n")
+                                  f.write(f"{imp}\n")
                                   print(f"    [+] {imp} (no version)")
                   else:
                       print(f"  {module_name}: (no external dependencies)")
               
-              # Save all imports for global requirements
-              print("\nGenerating detected imports list...")
-              with open('detected_imports.txt', 'w', encoding='utf-8') as f:
-                  for imp in sorted(all_imports):
-                      f.write(f"{imp}\n")
-              
-              # Save module mapping as JSON
-              with open('module_dependencies.json', 'w', encoding='utf-8') as f:
-                  json.dump(module_imports, f, indent=2)
-              
-              # Save requirements mapping
-              with open('requirements_versions.json', 'w', encoding='utf-8') as f:
-                  json.dump(requirements_map, f, indent=2)
+              # Save module dependencies mapping (NEW FORMAT: modulename.nexus.dependencies)
+              print("\nGenerating module dependencies files...")
+              for module_name, imports in module_imports.items():
+                  dep_file = Path('./bin') / f"{module_name}.nexus.dependencies"
+                  with open(dep_file, 'w', encoding='utf-8') as f:
+                      json.dump(sorted(imports), f, indent=2)
+                  print(f"  ✓ {dep_file}")
               
               print(f"\nSaved:")
-              print(f"  - Per-module requirements: requirements_per_module/")
-              print(f"  - Module dependencies: module_dependencies.json")
-              print(f"  - Version mapping: requirements_versions.json")
+              print(f"  - Per-module requirements: *.nexus.requirements")
+              print(f"  - Module dependencies: *.nexus.dependencies")
           
           if __name__ == '__main__':
               main()
@@ -949,121 +941,7 @@ jobs:
           python analyze_imports.py "$PYTHON_VERSION"
           
           echo ""
-          echo "=========================================="
-          echo "Creating global requirements with versions"
-          echo "=========================================="
-          
-          # Check if we have detected imports
-          if [ ! -f "detected_imports.txt" ] || [ ! -s "detected_imports.txt" ]; then
-            echo "No external dependencies detected"
-            cat > minimal_requirements.txt << EOF
-          # No external dependencies required
-          # Python version: $PYTHON_VERSION
-          # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          EOF
-          else
-            echo "Creating requirements.txt with versions from source..."
-            
-            # Create header with Python version
-            cat > minimal_requirements.txt << EOF
-          # Auto-generated minimal requirements
-          # Python version: $PYTHON_VERSION
-          # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          #
-          # Only includes packages actually used in compiled modules
-          # Versions extracted from requirements.txt
-          
-          EOF
-            
-            # Load requirements versions JSON
-            if [ -f "requirements_versions.json" ]; then
-              echo "Using version information from requirements.txt..."
-              
-              # Read each detected import and add with version
-              while IFS= read -r import_name; do
-                import_lower=$(echo "$import_name" | tr '[:upper:]' '[:lower:]')
-                
-                # Try to get versioned requirement from JSON
-                VERSIONED=$(python3 -c "
-          import json
-          import sys
-          try:
-              with open('requirements_versions.json') as f:
-                  data = json.load(f)
-              print(data.get('$import_lower', ''))
-          except:
-              sys.exit(1)
-          " 2>/dev/null)
-                
-                if [ -n "$VERSIONED" ]; then
-                  echo "$VERSIONED" >> minimal_requirements.txt
-                  echo "  [OK] $VERSIONED"
-                else
-                  # Not in requirements.txt, add without version
-                  echo "$import_name  # Version not specified - please add to requirements.txt" >> minimal_requirements.txt
-                  echo "  [WARN] $import_name (no version found)"
-                fi
-              done < detected_imports.txt
-              
-            else
-              # No version info available
-              echo "No version information available, adding packages without versions..."
-              cat >> minimal_requirements.txt << EOF
-          # WARNING: No version constraints specified
-          # Please update requirements.txt with proper version pins
-          
-          EOF
-              while IFS= read -r import_name; do
-                echo "$import_name" >> minimal_requirements.txt
-                echo "  + $import_name"
-              done < detected_imports.txt
-            fi
-          fi
-          
-          echo ""
-          echo "=========================================="
-          echo "Final minimal requirements.txt:"
-          echo "=========================================="
-          cat minimal_requirements.txt
-          
-          # Validate requirements
-          echo ""
-          echo "=========================================="
-          echo "Validating requirements..."
-          echo "=========================================="
-          
-          # Count requirements
-          REQ_COUNT=$(grep -v '^#' minimal_requirements.txt | grep -v '^$' | wc -l)
-          echo "Total requirements: $REQ_COUNT"
-          
-          # Check for unversioned packages
-          UNVERSIONED=$(grep -v '^#' minimal_requirements.txt | grep -v '^$' | grep -c '# Version not specified' || true)
-          if [ "$UNVERSIONED" -gt 0 ]; then
-            echo "[WARN] Warning: $UNVERSIONED package(s) without version constraints"
-            echo "Please add versions to requirements.txt for:"
-            grep '# Version not specified' minimal_requirements.txt | cut -d' ' -f1 || true
-          else
-            echo "[OK] All packages have version constraints"
-          fi
-          
-          # Create requirements map with metadata
-          cat > requirements_map.json << EOF
-          {
-            "python_version": "$PYTHON_VERSION",
-            "platform": "${{ matrix.platform }}",
-            "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "total_dependencies": $REQ_COUNT,
-            "unversioned_count": $UNVERSIONED,
-            "per_module_requirements": "requirements_per_module/",
-            "source": "requirements.txt"
-          }
-          EOF
-          
-          echo ""
           echo "[OK] Requirements analysis complete"
-          
-          # Save for build step
-          cp minimal_requirements.txt requirements_for_build.txt
       
 
       - name: Build all modules with Nuitka
@@ -1233,10 +1111,10 @@ jobs:
           
           echo "[OK] Verification passed: $MODULE_COUNT modules compiled"
 
-      - name: Set Up Nexus Loader
+      - name: Set Up Nexus Loader and Documentation
         shell: bash
         run: |
-          echo "Creating NexusLoader.py and NexusLoader.md in bin directory..."
+          echo "Creating NexusLoader.py and documentation in bin directory..."
           
           # Create bin directory if it doesn't exist
           mkdir -p ./bin
@@ -1384,8 +1262,8 @@ jobs:
           
           echo "[OK] NexusLoader.py created"
           
-          # Create NexusLoader.md file in bin directory
-          cat > ./bin/NexusLoader.md << 'MDEOF'
+          # Create NexusLoader.nexus.md file in bin directory (NEW FORMAT)
+          cat > ./bin/NexusLoader.nexus.md << 'MDEOF'
           # NexusLoader
 
           A dynamic Python module loader for binary extensions (`.pyd` and `.so` files).
@@ -1557,9 +1435,11 @@ jobs:
           - Verify file permissions
 
           For more information, see the full documentation in the repository.
+          
+          Built with love by the Nexus Team
           MDEOF
           
-          echo "[OK] NexusLoader.md created"
+          echo "[OK] NexusLoader.nexus.md created"
           
           # Verify files were created in bin directory
           echo ""
@@ -1571,10 +1451,10 @@ jobs:
             exit 1
           fi
           
-          if [ -f "./bin/NexusLoader.md" ]; then
-            echo "  ✓ NexusLoader.md ($(wc -l < ./bin/NexusLoader.md) lines)"
+          if [ -f "./bin/NexusLoader.nexus.md" ]; then
+            echo "  ✓ NexusLoader.nexus.md ($(wc -l < ./bin/NexusLoader.nexus.md) lines)"
           else
-            echo "  ✗ NexusLoader.md not found"
+            echo "  ✗ NexusLoader.nexus.md not found"
             exit 1
           fi
           
@@ -1616,39 +1496,6 @@ jobs:
             echo "[OK] README.md copied"
           else
             echo "Warning: README.md not found in root directory"
-          fi
-          
-          # Copy requirements files to bin
-          if [ -f "requirements_for_build.txt" ]; then
-            echo "Adding minimal requirements.txt to package..."
-            cp requirements_for_build.txt ./bin/requirements.txt
-            echo "Contents:"
-            cat ./bin/requirements.txt
-          elif [ -f "requirements.txt" ]; then
-            echo "Using original requirements.txt..."
-            cp requirements.txt ./bin/
-          else
-            echo "No requirements found, creating empty requirements.txt..."
-            echo "# No external dependencies required" > ./bin/requirements.txt
-          fi
-          
-          # Copy per-module requirements if they exist
-          if [ -d "requirements_per_module" ]; then
-            echo "Adding per-module requirements..."
-            cp -r requirements_per_module ./bin/
-            echo "Per-module requirements included"
-          fi
-          
-          # Copy module dependencies mapping
-          if [ -f "module_dependencies.json" ]; then
-            echo "Adding module dependencies mapping..."
-            cp module_dependencies.json ./bin/
-          fi
-          
-          # Copy requirements map
-          if [ -f "requirements_map.json" ]; then
-            echo "Adding requirements metadata..."
-            cp requirements_map.json ./bin/
           fi
           
           # List files that will be zipped
@@ -1768,13 +1615,13 @@ jobs:
             # Build list of available module packages
             PACKAGES=""
             if [ "${{ needs.setup.outputs.build_linux }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **Linux Modules (.so files)**: \`${BINARY_NAME}-linux-modules.zip\`"$'\n'
+              PACKAGES="${PACKAGES}- **Linux Modules (.so files)**: \`${BINARY_NAME}-linux-modules.zip\`"\n'
             fi
             if [ "${{ needs.setup.outputs.build_windows }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **Windows Modules (.pyd files)**: \`${BINARY_NAME}-windows-modules.zip\`"$'\n'
+              PACKAGES="${PACKAGES}- **Windows Modules (.pyd files)**: \`${BINARY_NAME}-windows-modules.zip\`"\n'
             fi
             if [ "${{ needs.setup.outputs.build_macos }}" == "true" ]; then
-              PACKAGES="${PACKAGES}- **macOS Modules (.so files)**: \`${BINARY_NAME}-macos-modules.zip\`"$'\n'
+              PACKAGES="${PACKAGES}- **macOS Modules (.so files)**: \`${BINARY_NAME}-macos-modules.zip\`"\n'
             fi
 
             # Create the main file template
@@ -1804,15 +1651,32 @@ jobs:
             PACKAGES_PLACEHOLDER
             
             ### What's Included
-            Each platform-specific zip file contains **compiled Python modules** (binary extensions):
+            Each platform-specific zip file contains **compiled Python modules** (binary extensions) with metadata:
+            
+            **Binary Files:**
             - **Linux/macOS**: `.so` files (Python extension modules)
             - **Windows**: `.pyd` files (Python extension modules)
+            
+            **Metadata Files (NEW):**
+            - `modulename.nexus.cli` - CLI API documentation (JSON)
+            - `modulename.nexus.rest` - REST API documentation (JSON)
+            - `modulename.nexus.licensed` - Licensed features documentation (JSON)
+            - `modulename.nexus.requirements` - Module-specific requirements
+            - `modulename.nexus.dependencies` - Module dependencies mapping (JSON)
+            - `modulename.nexus.md` - Module documentation (Markdown)
+            
+            **Utilities:**
+            - `NexusLoader.py` - Dynamic module loader
+            - `NexusLoader.nexus.md` - Loader documentation
+            - `README.md` - Project documentation
             
             **Benefits:**
             - Source code protected (IP protection)
             - No .py files included
             - Native performance
             - Direct Python import capability
+            - Complete API documentation included
+            - Per-module dependency tracking
             
             **Important:**
             - Modules are platform-specific (not cross-compatible)
@@ -1822,9 +1686,7 @@ jobs:
             ### Installation
             
             #### Prerequisites
-            ```bash
-            pip install -r requirements.txt
-            ```
+            Check the `.nexus.requirements` files for each module's specific dependencies.
             
             #### Option 1: Automatic with NexusSkyBase (Recommended)
             ```python
@@ -1856,6 +1718,9 @@ jobs:
             ```bash
             wget https://github.com/REPO_PLACEHOLDER/releases/download/VERSION_PLACEHOLDER/BINARY_NAME_PLACEHOLDER-linux-modules.zip
             unzip BINARY_NAME_PLACEHOLDER-linux-modules.zip -d ~/.nexus/bin/
+            
+            # Install module-specific dependencies
+            pip install -r ~/.nexus/bin/modulename.nexus.requirements
             ```
             
             **Windows:**
@@ -1864,6 +1729,10 @@ jobs:
             # Add to Python path
             import sys
             sys.path.insert(0, 'C:\\Users\\YourName\\.nexus\\bin')
+            
+            # Install dependencies for specific module
+            pip install -r C:\Users\YourName\.nexus\bin\modulename.nexus.requirements
+            
             import YourModule
             ```
             
@@ -1875,12 +1744,45 @@ jobs:
             result = instance.do_something()
             ```
             
+            ### Exploring Module APIs
+            
+            Each module includes comprehensive API documentation:
+            
+            ```python
+            import json
+            from pathlib import Path
+            
+            # Load CLI API documentation
+            with open('modulename.nexus.cli') as f:
+                cli_apis = json.load(f)
+                print(f"Available CLI methods: {cli_apis}")
+            
+            # Load REST API documentation
+            with open('modulename.nexus.rest') as f:
+                rest_apis = json.load(f)
+                print(f"Available REST endpoints: {rest_apis}")
+            
+            # Check module dependencies
+            with open('modulename.nexus.dependencies') as f:
+                deps = json.load(f)
+                print(f"Required packages: {deps}")
+            ```
+            
             ### Platform Compatibility
             | Platform | File Type | Python Version |
             |----------|-----------|----------------|
             | Linux x64 | .so | PYTHON_VERSION_PLACEHOLDER |
             | Windows | .pyd | PYTHON_VERSION_PLACEHOLDER |
             | macOS | .so | PYTHON_VERSION_PLACEHOLDER |
+            
+            ### File Naming Convention
+            All metadata files follow the pattern: `modulename.nexus.{extension}`
+            - `.nexus.cli` - CLI API definitions
+            - `.nexus.rest` - REST API definitions
+            - `.nexus.licensed` - Licensed features
+            - `.nexus.requirements` - Dependencies list
+            - `.nexus.dependencies` - Dependency mapping (JSON)
+            - `.nexus.md` - Documentation
             
             ---
             
