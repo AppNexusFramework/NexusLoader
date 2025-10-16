@@ -20,16 +20,16 @@ class Test:
         pass
     
     NexusDecorators.allow_cli
-    def func1(self):
+    def func1(self, var1: int, var2: str):
         print("func1 executed")
         pass
 
     NexusDecorators.allow_restapi
-    def func2(self):
+    def func2(self, list_var: list):
         print("func2 executed")
         pass
 
     NexusDecorators.allow_license(func_validator(["free", "pro"]))
-    def func3(self):
+    def func3(self, dict_var: dict):
         print("func3 executed")
 
