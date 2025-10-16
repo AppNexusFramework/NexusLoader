@@ -2,7 +2,7 @@ from NexusFramework import NexusDecorators
 
 def func_validator(licenses):
     print(f"Validator created with licenses: {licenses}")
-    if licenses.contains("pro"):
+    if licenses in ["pro"]:
         return True
     else:
         return False
